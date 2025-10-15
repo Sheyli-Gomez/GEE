@@ -1,0 +1,87 @@
+/* Filtrado de imagenes de Sentinel 2, estimación de indices y descarga de capas */
+
+// Simbología del área de estudio
+var lim_cuerval = ee.FeatureCollection(table);
+var estilo = {
+  fillColor: '00000000',  // Color de relleno transparente
+  color: 'FF0000',        // Color de la línea exterior en rojo
+  width: 2                // Ancho de la línea exterior en píxeles
+};
+
+// Paso 1. Función para enmascaramiento de las nubes, dejar parámetros por default
+function maskS2clouds(image) {
+var qa = image.select('QA60');
+// Bits 10 and 11 are clouds and cirrus, respectively.
+var cloudBitMask = 1 << 10;
+var cirrusBitMask = 1 << 11;
+// Both flags should be set to zero, indicating clear conditions.
+var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+.and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+return image.updateMask(mask).divide(10000);
+}
+
+//Paso 2. Filtrar la colección de imagenes por fecha y % de nubes
+var filtered_sentinel = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+.filterDate('2025-01-01', '2025-03-30')
+// Pre-filter to get less cloudy granules.
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))
+.map(maskS2clouds);
+var S2_filtrada=filtered_sentinel.reduce(ee.Reducer.median());
+
+//Paso 3.1 Parametros visualización de imagen reducida
+var rgbVis_median = {
+min: 0.0,
+max: 0.3,
+bands: ['B4_median', 'B3_median', 'B2_median'],
+};
+print(S2_filtrada);
+
+//Paso 4. Estimación del NDVI, se utiliza la función normalizedDifference que ya viene integrada en GEE
+var ndvi = S2_filtrada.normalizedDifference(['B8_median', 'B4_median']);
+var image = S2_filtrada.addBands(ndvi.rename('NDVI'));
+
+//Paso 4.1 Estimación del EVI
+var EVIexp = "G *(NIR - RED) / (NIR + C1 * RED - C2 * BLUE + L)";
+var parameters = {
+"G": 2.5,
+"NIR": S2_filtrada.select("B8_median"),
+"RED": S2_filtrada.select("B4_median"),
+"BLUE": S2_filtrada.select("B1_median"),
+"C1": 6.0,
+"C2": 7.5,
+"L": 1.0
+};
+var EVI =
+S2_filtrada.expression(EVIexp,parameters);
+
+//Paso 6. Cortar imagen S2, NDVI y el EVI
+var S2_CLIP = S2_filtrada.clip (lim_cuerval);
+var S2 = S2_CLIP;
+var NDVI_CLIP = ndvi.clip (lim_cuerval);
+var NDVI = NDVI_CLIP;
+var EVI_CLIP = EVI.clip (lim_cuerval);
+var NDVI = EVI_CLIP;
+
+//VIS
+//Visualización de las imágenes sin cortar
+Map.addLayer(S2_filtrada, rgbVis_median, 'S2_COMPLETA');
+Map.addLayer(EVI,{"min":0,"max":1,palette: ['FFFFFF', '339900'] },"S2-EVI");
+Map.addLayer(ndvi,{min: -1.0, max:1.0, palette: ['FFFFFF', '339900']},"S2-NDVI");
+
+//Visualización de la imágenes cortadas
+Map.addLayer(S2_CLIP, rgbVis_median, 'S2_RECORTE');
+Map.addLayer(NDVI_CLIP,{min: -1.0, max:1.0, palette: ['FFFFFF', '339900']},"NDVI_RECORTE");
+Map.addLayer(EVI_CLIP,{min: -1.0, max:1.0, palette: ['FFFFFF', '339900']},"EVI_RECORTE");
+Map.addLayer(lim_cuerval.style(estilo), {}, 'Límite cuerval');
+
+Map.centerObject(lim_cuerval, 12);
+
+//Descarga a google drive
+Export.image.toDrive({
+image: NDVI_CLIP,
+description: "NDVI_CLIP",
+folder: "CUERVAL",
+scale: 10,
+maxPixels: 5000000000,
+region: lim_cuerval});
+
